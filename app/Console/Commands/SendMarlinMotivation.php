@@ -9,34 +9,26 @@ use App\Models\User;
 
 class SendMarlinMotivation extends Command
 {
-    /**
-     * El nombre que usarás en la terminal: php artisan marlin:motivar
-     */
     protected $signature = 'marlin:motivar';
-
-    /**
-     * Descripción de lo que hace el comando.
-     */
     protected $description = 'Envía una frase inspiradora de una figura mundial generada por IA';
 
     public function handle()
     {
+        set_time_limit(60); // Seguridad extra para el comando
+
         try {
-            Log::info("Iniciando generación de motivación con IA...");
-            
+            Log::info("Iniciando motivación Marlin...");
             $client = \Gemini::client(env('GEMINI_API_KEY'));
 
-            $prompt = "Genera una frase motivadora corta (máximo 15 palabras) de un cantante famoso, 
-                       líder mundial, deportista o figura histórica icónica en español. 
-                       Formato: 'Frase' - Autor. 
-                       IMPORTANTE: Que sea inspirador. Evita frases trilladas.";
+            $prompt = "Genera una frase motivadora corta (máximo 15 palabras) de un famoso en español. Formato: 'Frase' - Autor.";
 
-            $res = $client->generativeModel('gemini-2.5-flash')->generateContent($prompt);
+            // Usando el modelo de 2026 más veloz
+            $res = $client->generativeModel('gemini-3.1-flash-lite-preview')->generateContent($prompt);
             $fraseIA = trim($res->text());
 
             $mensaje = "✨ *Marlin Inspirador* ✨\n\n" .
                 "$fraseIA" . "\n\n" .
-                "¡Sigue nadando, el éxito está cerca! 🤡🧡🐟";
+                "¡Sigue nadando! 🤡🧡🐟";
 
             $users = User::whereNotNull('phone_number')->get();
 
@@ -44,18 +36,15 @@ class SendMarlinMotivation extends Command
                 $this->sendMessage($user->phone_number, $mensaje);
             }
 
-            Log::info("Motivación enviada con éxito a " . $users->count() . " usuarios.");
-            $this->info("Mensajes enviados correctamente.");
+            Log::info("Motivación enviada a " . $users->count() . " usuarios.");
+            $this->info("¡Todo listo!");
 
         } catch (\Exception $e) {
-            Log::error("Fallo al generar frase motivacional: " . $e->getMessage());
+            Log::error("Fallo Motivación: " . $e->getMessage());
             $this->error("Error: " . $e->getMessage());
         }
     }
 
-    /**
-     * Método para enviar el mensaje vía WhatsApp (necesario dentro del comando)
-     */
     private function sendMessage($to, $text)
     {
         Http::withToken(env('WHATSAPP_TOKEN'))->post("https://graph.facebook.com/v20.0/" . env('WHATSAPP_PHONE_ID') . "/messages", [
