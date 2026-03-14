@@ -8,12 +8,12 @@ Artisan::command('inspire', function () {
     $this->comment(Inspiring::quote());
 })->purpose('Display an inspiring quote');
 
-// Schedule::command('marlin:motivar')
-//     ->hourly()
-//     ->between('08:00', '20:00')
-//     ->timezone('America/Bogota');
-
 Schedule::command('marlin:motivar')
-    ->everyFiveMinutes() 
+    ->hourly()
     ->between('08:00', '20:00')
     ->timezone('America/Bogota');
+
+// Schedule::command('marlin:motivar')
+//     ->everyFiveMinutes() 
+//     ->between('08:00', '20:00')
+//     ->timezone('America/Bogota');

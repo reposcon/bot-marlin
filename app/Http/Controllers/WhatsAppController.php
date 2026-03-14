@@ -34,15 +34,17 @@ class WhatsAppController extends Controller
             $text = trim($message['text']['body']);
             $user = User::where('phone_number', $sender)->first();
 
+            // Registro de usuario nuevo
             if (!$user) {
                 User::create(['phone_number' => $sender]);
                 $this->sendMessage($sender, "¡Hola! Soy *Marlin*. 🤡🧡🐟\n\n¿Cómo te llamas? 🪸");
                 return response('OK', 200);
             }
 
+            // Captura de nombre
             if (empty($user->name)) {
                 $user->update(['name' => $text]);
-                $this->sendMessage($sender, "¡Mucho gusto, *{$text}*! 🤝");
+                $this->sendMessage($sender, "¡Mucho gusto, *{$text}*! 🤝 ¿En qué puedo ayudarte hoy?");
                 return response('OK', 200);
             }
 
@@ -53,35 +55,57 @@ class WhatsAppController extends Controller
 
     private function procesarPeticion($user, $text)
     {
-        $cleanText = trim(preg_replace('/^marlin[\s,.]+/i', '', $text));
-        if (empty($cleanText)) {
-            $cleanText = $text;
-        }
-
-        // Borrar todo (Lógica simple)
+        // 1. Borrar TODO
         if (preg_match('/\b(borrar todo|limpiar agenda|vaciar notas)\b/i', $text)) {
             Memory::where('phone_number', $user->phone_number)->delete();
-            $this->sendMessage($user->phone_number, "¡Listo {$user->name}! He vaciado tu lista. ✨");
+            $this->sendMessage($user->phone_number, "¡Listo {$user->name}! He vaciado tu lista por completo. ✨");
             return response('OK', 200);
         }
 
-        // Listar notas
+        // 2. Borrar una nota específica por número (Ej: "borrar 2")
+        if (preg_match('/\b(borrar|eliminar|quitar)\s+(\d+)\b/i', $text, $matches)) {
+            return $this->handleDeleteSpecific($user, $matches[2]);
+        }
+
+        // 3. Listar notas con filtros (IA)
         if (preg_match('/\b(lista|ver|notas|pendientes|tengo|hay|agenda)\b/i', $text)) {
             return $this->handleListRequest($user, $text);
         }
 
-        // Si no es ninguna de las anteriores, es GUARDAR
-        return $this->handleSaveRequest($user, $cleanText);
+        // 4. Si no es comando, es GUARDAR nota
+        return $this->handleSaveRequest($user, $text);
+    }
+
+    private function handleDeleteSpecific($user, $index)
+    {
+        // Obtenemos las notas actuales para identificar cuál es la que el usuario quiere borrar
+        $notes = Memory::where('phone_number', $user->phone_number)
+            ->orderBy('event_date', 'asc')
+            ->get();
+
+        $target = $notes->get($index - 1); // get() usa índice base 0
+
+        if ($target) {
+            $contenidoEliminado = $target->content;
+            $target->delete();
+            $this->sendMessage($user->phone_number, "✅ He eliminado la nota #{$index}: _{$contenidoEliminado}_");
+        } else {
+            $this->sendMessage($user->phone_number, "❌ No encontré ninguna nota con el número *{$index}* en tu lista actual.");
+        }
+        return response('OK', 200);
     }
 
     private function handleListRequest($user, $text)
     {
-        $hoy = Carbon::now();
+        $hoy = Carbon::now('America/Bogota');
         $data = ['start' => $hoy->format('Y-m-d'), 'end' => $hoy->format('Y-m-d'), 'label' => 'hoy'];
 
         try {
             $client = \Gemini::client(env('GEMINI_API_KEY'));
-            $prompt = "Hoy es {$hoy->format('Y-m-d')}. El usuario dice: '$text'. Responde SOLO un JSON con: 'start', 'end', 'label'.";
+            $prompt = "Hoy es {$hoy->format('Y-m-d')} ({$hoy->format('l')}). 
+                       El usuario dice: '$text'. 
+                       Analiza si pide hoy, mañana, o esta semana. 
+                       Responde estrictamente un JSON: {'start': 'YYYY-MM-DD', 'end': 'YYYY-MM-DD', 'label': 'nombre del periodo'}.";
 
             $result = $client->generativeModel('gemini-1.5-flash')->generateContent($prompt);
             $cleanJson = trim(preg_replace('/^```json|```$/m', '', $result->text()));
@@ -99,12 +123,14 @@ class WhatsAppController extends Controller
             ->orderBy('event_date', 'asc')->get();
 
         if ($notes->isEmpty()) {
-            $this->sendMessage($user->phone_number, "Oye {$user->name}, para *{$data['label']}* no hay nada. 😎");
+            $this->sendMessage($user->phone_number, "{$user->name}, no tienes nada anotado para *{$data['label']}*. 😎");
         } else {
-            $msg = "Vale {$user->name}, esto hay para *{$data['label']}*: \n\n";
+            $msg = "Vale {$user->name}, esto tienes para *{$data['label']}*: \n\n";
             foreach ($notes as $key => $n) {
-                $msg .= "*" . ($key + 1) . ".* {$n->content} (📅 " . Carbon::parse($n->event_date)->format('d/m') . ")\n";
+                $fechaFormateada = $n->event_date ? Carbon::parse($n->event_date)->format('d/m') : 'S/F';
+                $msg .= "*" . ($key + 1) . ".* {$n->content} (📅 {$fechaFormateada})\n";
             }
+            $msg .= "\n_Si quieres quitar una, dime 'borrar [número]'_";
             $this->sendMessage($user->phone_number, $msg);
         }
         return response('OK', 200);
@@ -113,12 +139,15 @@ class WhatsAppController extends Controller
     private function handleSaveRequest($user, $text)
     {
         $eventDate = null;
+        $cleanText = trim(preg_replace('/^marlin[\s,.]+/i', '', $text));
+
+        // Detectar si el mensaje menciona una fecha
         $keywords = '/(hoy|mañana|pasado|lunes|martes|miercoles|jueves|viernes|sabado|domingo|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre|el \d+)/i';
 
         if (preg_match($keywords, $text)) {
             try {
                 $client = \Gemini::client(env('GEMINI_API_KEY'));
-                $prompt = "Extrae fecha YYYY-MM-DD de: '$text'. Hoy es " . date('Y-m-d') . ". Si no hay, responde 'null'.";
+                $prompt = "Extrae la fecha en formato YYYY-MM-DD del texto: '$text'. Hoy es " . date('Y-m-d') . ". Si no hay fecha clara, responde 'null'.";
 
                 $res = $client->generativeModel('gemini-1.5-flash')->generateContent($prompt);
                 $extracted = trim($res->text());
@@ -133,7 +162,7 @@ class WhatsAppController extends Controller
 
         Memory::create([
             'phone_number' => $user->phone_number,
-            'content' => $text,
+            'content' => $cleanText,
             'event_date' => $eventDate
         ]);
 
