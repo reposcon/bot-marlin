@@ -13,6 +13,7 @@ class WhatsAppController extends Controller
 {
     public function verifyWebhook(Request $request)
     {
+        //contraseña
         $verifyToken = 'Roger_Key_2026';
         if ($request->query('hub_mode') === 'subscribe' && $request->query('hub_verify_token') === $verifyToken) {
             return response($request->query('hub_challenge'), 200);
