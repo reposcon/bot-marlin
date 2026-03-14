@@ -22,29 +22,42 @@ class WhatsAppController extends Controller
 
     public function handleWebhook(Request $request)
     {
-        set_time_limit(60);
         $data = $request->all();
         $message = $data['entry'][0]['changes'][0]['value']['messages'][0] ?? null;
 
         if ($message && isset($message['text']['body'])) {
-            $messageTimestamp = $message['timestamp'];
-            if ((time() - $messageTimestamp) > 120) return response('OK', 200);
+            // --- FILTRO DE MENSAJES ANTIGUOS ---
+            $messageTimestamp = $message['timestamp']; // Timestamp que envía Meta
+            $currentTime = time();
+
+            // Si el mensaje tiene más de 120 segundos (2 min), lo ignoramos
+            if (($currentTime - $messageTimestamp) > 120) {
+                Log::warning("Ignorando mensaje antiguo acumulado: " . $message['text']['body']);
+                return response('OK', 200); // Decimos OK a Meta para que deje de reintentar
+            }
+            // ------------------------------------
 
             $sender = $message['from'];
             $text = trim($message['text']['body']);
+
+            Log::info("--- Nuevo Mensaje Recibido ---", ['de' => $sender, 'texto' => $text]);
+
             $user = User::where('phone_number', $sender)->first();
 
-            // Registro de usuario nuevo
             if (!$user) {
                 User::create(['phone_number' => $sender]);
-                $this->sendMessage($sender, "¡Hola! Soy *Marlin*. 🤡🧡🐟\n\n¿Cómo te llamas? 🪸");
+                $this->sendMessage($sender, "¡Hola! Soy *Marlin*. 🤡🧡🐟\n\n" .
+                    "Como diría mi hijo Nemo: \"¡El mar no es tan malo, papá!\". " .
+                    "Pero por si acaso, yo estoy aquí para que no se te pierda ninguna nota en este océano de pendientes. 🌊🐚\n\n" .
+                    "Antes de empezar nuestra travesía... ¿cómo te llamas? 🪸");
                 return response('OK', 200);
             }
 
-            // Captura de nombre
             if (empty($user->name)) {
                 $user->update(['name' => $text]);
-                $this->sendMessage($sender, "¡Mucho gusto, *{$text}*! 🤝 ¿En qué puedo ayudarte hoy?");
+                $this->sendMessage($sender, "¡Mucho gusto, *{$text}*! 🤝 Ya te tengo en mi cardumen. 🐟✨\n\n" .
+                    "A partir de ahora, solo mándame lo que necesites recordar o pídeme tu lista. " .
+                    "¡Nadaremos, nadaremos, en notas guardaremos! 🌊💨");
                 return response('OK', 200);
             }
 
@@ -52,62 +65,42 @@ class WhatsAppController extends Controller
         }
         return response('OK', 200);
     }
-
     private function procesarPeticion($user, $text)
     {
-        // 1. Borrar TODO
+        // Limpieza de "marlin" con coma, punto o espacio
+        $cleanText = trim(preg_replace('/^marlin[\s,.]+/i', '', $text));
+
+        // Si el usuario solo puso "marlin", usamos el texto original para no guardar vacío
+        if (empty($cleanText)) {
+            $cleanText = $text;
+        }
+
         if (preg_match('/\b(borrar todo|limpiar agenda|vaciar notas)\b/i', $text)) {
             Memory::where('phone_number', $user->phone_number)->delete();
-            $this->sendMessage($user->phone_number, "¡Listo {$user->name}! He vaciado tu lista por completo. ✨");
+            $this->sendMessage($user->phone_number, "¡Listo {$user->name}! He vaciado toda tu lista. ✨");
             return response('OK', 200);
         }
 
-        // 2. Borrar una nota específica por número (Ej: "borrar 2")
-        if (preg_match('/\b(borrar|eliminar|quitar)\s+(\d+)\b/i', $text, $matches)) {
-            return $this->handleDeleteSpecific($user, $matches[2]);
+        if (preg_match('/\b(borra|elimina|quitar|delete)\b/i', $text)) {
+            return $this->handleDeleteRequest($user, $text);
         }
 
-        // 3. Listar notas con filtros (IA)
         if (preg_match('/\b(lista|ver|notas|pendientes|tengo|hay|agenda)\b/i', $text)) {
             return $this->handleListRequest($user, $text);
         }
 
-        // 4. Si no es comando, es GUARDAR nota
-        return $this->handleSaveRequest($user, $text);
-    }
-
-    private function handleDeleteSpecific($user, $index)
-    {
-        // Obtenemos las notas actuales para identificar cuál es la que el usuario quiere borrar
-        $notes = Memory::where('phone_number', $user->phone_number)
-            ->orderBy('event_date', 'asc')
-            ->get();
-
-        $target = $notes->get($index - 1); // get() usa índice base 0
-
-        if ($target) {
-            $contenidoEliminado = $target->content;
-            $target->delete();
-            $this->sendMessage($user->phone_number, "✅ He eliminado la nota #{$index}: _{$contenidoEliminado}_");
-        } else {
-            $this->sendMessage($user->phone_number, "❌ No encontré ninguna nota con el número *{$index}* en tu lista actual.");
-        }
-        return response('OK', 200);
+        return $this->handleSaveRequest($user, $cleanText);
     }
 
     private function handleListRequest($user, $text)
     {
-        $hoy = Carbon::now('America/Bogota');
+        $hoy = Carbon::now();
         $data = ['start' => $hoy->format('Y-m-d'), 'end' => $hoy->format('Y-m-d'), 'label' => 'hoy'];
 
         try {
             $client = \Gemini::client(env('GEMINI_API_KEY'));
-            $prompt = "Hoy es {$hoy->format('Y-m-d')} ({$hoy->format('l')}). 
-                       El usuario dice: '$text'. 
-                       Analiza si pide hoy, mañana, o esta semana. 
-                       Responde estrictamente un JSON: {'start': 'YYYY-MM-DD', 'end': 'YYYY-MM-DD', 'label': 'nombre del periodo'}.";
-
-            $result = $client->generativeModel('gemini-1.5-flash')->generateContent($prompt);
+            $prompt = "Hoy es {$hoy->format('Y-m-d')}. El usuario ({$user->name}) dice: '$text'. Devuelve JSON con: 'start', 'end', 'label'.";
+            $result = $client->generativeModel('gemini-2.5-flash')->generateContent($prompt);
             $cleanJson = trim(preg_replace('/^```json|```$/m', '', $result->text()));
             $decoded = json_decode($cleanJson, true);
 
@@ -115,7 +108,7 @@ class WhatsAppController extends Controller
                 $data = $decoded;
             }
         } catch (\Exception $e) {
-            Log::error("Error IA List: " . $e->getMessage());
+            $this->handleAiError($user, $e);
         }
 
         $notes = Memory::where('phone_number', $user->phone_number)
@@ -123,14 +116,12 @@ class WhatsAppController extends Controller
             ->orderBy('event_date', 'asc')->get();
 
         if ($notes->isEmpty()) {
-            $this->sendMessage($user->phone_number, "{$user->name}, no tienes nada anotado para *{$data['label']}*. 😎");
+            $this->sendMessage($user->phone_number, "Oye {$user->name}, para *{$data['label']}* no encontré nada. 😎");
         } else {
-            $msg = "Vale {$user->name}, esto tienes para *{$data['label']}*: \n\n";
+            $msg = "Vale {$user->name}, esto hay para *{$data['label']}*: \n\n";
             foreach ($notes as $key => $n) {
-                $fechaFormateada = $n->event_date ? Carbon::parse($n->event_date)->format('d/m') : 'S/F';
-                $msg .= "*" . ($key + 1) . ".* {$n->content} (📅 {$fechaFormateada})\n";
+                $msg .= "*" . ($key + 1) . ".* {$n->content} (📅 " . Carbon::parse($n->event_date)->format('d/m') . ")\n";
             }
-            $msg .= "\n_Si quieres quitar una, dime 'borrar [número]'_";
             $this->sendMessage($user->phone_number, $msg);
         }
         return response('OK', 200);
@@ -139,46 +130,89 @@ class WhatsAppController extends Controller
     private function handleSaveRequest($user, $text)
     {
         $eventDate = null;
-        $cleanText = trim(preg_replace('/^marlin[\s,.]+/i', '', $text));
-
-        // Detectar si el mensaje menciona una fecha
         $keywords = '/(hoy|mañana|pasado|lunes|martes|miercoles|jueves|viernes|sabado|domingo|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre|el \d+)/i';
 
         if (preg_match($keywords, $text)) {
             try {
+                Log::info("Consultando IA para extraer fecha...");
                 $client = \Gemini::client(env('GEMINI_API_KEY'));
-                $prompt = "Extrae la fecha en formato YYYY-MM-DD del texto: '$text'. Hoy es " . date('Y-m-d') . ". Si no hay fecha clara, responde 'null'.";
-
-                $res = $client->generativeModel('gemini-1.5-flash')->generateContent($prompt);
+                $prompt = "Extrae fecha YYYY-MM-DD de: '$text'. Hoy es " . date('Y-m-d') . ". Si no hay, responde 'null'.";
+                $res = $client->generativeModel('gemini-2.5-flash')->generateContent($prompt);
                 $extracted = trim($res->text());
 
                 if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $extracted)) {
                     $eventDate = $extracted;
+                    Log::info("Fecha extraída con éxito: " . $eventDate);
                 }
             } catch (\Exception $e) {
-                Log::error("Error IA Save: " . $e->getMessage());
+                Log::error("Fallo IA en Save (Silenciado): " . $e->getMessage());
             }
         }
 
+        // GUARDADO GARANTIZADO
         Memory::create([
             'phone_number' => $user->phone_number,
-            'content' => $cleanText,
+            'content' => $text,
             'event_date' => $eventDate
         ]);
+        Log::info("Nota guardada en BD para: " . $user->phone_number);
 
-        $msg = "¡Anotado, {$user->name}! ✅" . ($eventDate ? " para el " . Carbon::parse($eventDate)->format('d/m') . "." : "");
+        $msg = "¡Anotado, {$user->name}! ✅";
+        if ($eventDate) {
+            $msg .= " para el " . Carbon::parse($eventDate)->format('d/m') . ".";
+        }
+
+        // Enviamos y logueamos la acción
         $this->sendMessage($user->phone_number, $msg);
+        Log::info("Respuesta enviada a WhatsApp.");
 
         return response('OK', 200);
     }
 
+    private function handleDeleteRequest($user, $text)
+    {
+        preg_match('/\d+/', $text, $matches);
+        $index = isset($matches[0]) ? (int)$matches[0] : null;
+
+        if ($index) {
+            $noteToDelete = Memory::where('phone_number', $user->phone_number)
+                ->orderBy('created_at', 'desc')->skip($index - 1)->first();
+
+            if ($noteToDelete) {
+                $content = $noteToDelete->content;
+                $noteToDelete->delete();
+                $this->sendMessage($user->phone_number, "¡Hecho! Borré *\"$content\"* ✅");
+            } else {
+                $this->sendMessage($user->phone_number, "Ups, no encontré la nota número $index.");
+            }
+        } else {
+            $this->sendMessage($user->phone_number, "{$user->name}, dime el número de la nota a borrar.");
+        }
+        return response('OK', 200);
+    }
+
+    private function handleAiError($user, $e)
+    {
+        if (str_contains($e->getMessage(), 'quota')) {
+            Log::warning("Quota reached for {$user->name}");
+        } else {
+            Log::error("Error de IA: " . $e->getMessage());
+        }
+    }
+
     private function sendMessage($to, $text)
     {
-        Http::withToken(env('WHATSAPP_TOKEN'))->post("https://graph.facebook.com/v20.0/" . env('WHATSAPP_PHONE_ID') . "/messages", [
+        $response = Http::withToken(env('WHATSAPP_TOKEN'))->post("https://graph.facebook.com/v20.0/" . env('WHATSAPP_PHONE_ID') . "/messages", [
             'messaging_product' => 'whatsapp',
             'to' => $to,
             'type' => 'text',
             'text' => ['body' => $text]
         ]);
+
+        if ($response->failed()) {
+            Log::error("Error enviando a Meta API: " . $response->body());
+        } else {
+            Log::info("Mensaje entregado a Meta correctamente.");
+        }
     }
 }
