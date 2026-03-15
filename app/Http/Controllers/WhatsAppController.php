@@ -127,9 +127,13 @@ class WhatsAppController extends Controller
             // Respuesta final
             $finalReply = $response['reply'] ?? "¡Listo! He procesado tu solicitud. 🤡";
             $this->sendMessage($user->phone_number, $finalReply);
+            // } catch (\Exception $e) {
+            //     Log::error("Marlin AI Error Crítico: " . $e->getMessage());
+            //     $this->sendMessage($user->phone_number, "Lo siento, me dio un calambre en la aleta. 🤡");
+            // }
         } catch (\Exception $e) {
-            Log::error("Marlin AI Error Crítico: " . $e->getMessage());
-            $this->sendMessage($user->phone_number, "Lo siento, me dio un calambre en la aleta. 🤡");
+            // ESTO SOLO PARA PRUEBAS: Te dirá el error real en el chat
+            $this->sendMessage($user->phone_number, "Error real: " . $e->getMessage());
         }
 
         return response('OK', 200);
