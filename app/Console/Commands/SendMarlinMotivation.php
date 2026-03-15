@@ -31,7 +31,6 @@ class SendMarlinMotivation extends Command
 
             $prompt = "Genera una frase motivadora corta (máximo 15 palabras) sobre $temaAleatorio. 
                        Usa un autor famoso pero no repitas las frases. 
-                       Referencia única de sesión: $seed. 
                        Formato: 'Frase' - Autor.";
 
             // Generar contenido
