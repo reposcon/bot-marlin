@@ -61,7 +61,7 @@ class WhatsAppController extends Controller
             $prompt = "Eres Marlin, asistente de notas. Usuario: {$user->name}. Hoy: {$now->format('Y-m-d')}.
         Mensaje: '$text'
 
-        Analiza y responde ESTRICTAMENTE con este JSON. Si hay varias acciones (ej: cambiar nombre y guardar nota), incluye los datos de ambas:
+        Responde ESTRICTAMENTE con este JSON. Si hay varias acciones, inclúyelas:
         {
           'intent': 'SAVE' | 'LIST' | 'DELETE' | 'UPDATE_PROFILE' | 'CHAT' | 'CLEAR_ALL',
           'actions': {
@@ -70,48 +70,65 @@ class WhatsAppController extends Controller
             'delete': {'index': 'numero'},
             'list': {'start': 'YYYY-MM-DD', 'end': 'YYYY-MM-DD', 'label': 'hoy...'}
           },
-          'reply': 'respuesta amigable que confirme TODO lo que hiciste'
+          'reply': 'respuesta amigable en español confirmando todo lo hecho'
         }";
 
             $result = $client->generativeModel('gemini-2.5-flash')->generateContent($prompt);
             $rawText = $result->text();
+
+            // --- LIMPIEZA EXTREMA DEL JSON ---
             $cleanJson = trim(preg_replace('/^```json|```$/m', '', $rawText));
+            $startPos = strpos($cleanJson, '{');
+            $endPos = strrpos($cleanJson, '}');
+            if ($startPos !== false && $endPos !== false) {
+                $cleanJson = substr($cleanJson, $startPos, $endPos - $startPos + 1);
+            }
 
             $response = json_decode($cleanJson, true);
 
-            if (!$response) throw new \Exception("JSON inválido");
+            // Si el JSON falla, lanzamos error para ver el log
+            if (!$response) {
+                Log::error("Marlin - JSON Corrupto: " . $rawText);
+                throw new \Exception("IA devolvió basura");
+            }
 
-            // --- EJECUCIÓN MULTI-ACCIÓN ---
             $actions = $response['actions'] ?? [];
 
-            if (isset($actions['update_profile']['new_name'])) {
+            // 1. Cambio de nombre (UPDATE_PROFILE)
+            if (!empty($actions['update_profile']['new_name'])) {
                 $user->update(['name' => $actions['update_profile']['new_name']]);
             }
 
-            if (isset($actions['save']['content'])) {
+            // 2. Guardado de nota (SAVE)
+            if (!empty($actions['save']['content'])) {
                 Memory::create([
                     'phone_number' => $user->phone_number,
                     'content' => $actions['save']['content'],
-                    'event_date' => $actions['save']['date']
+                    'event_date' => $actions['save']['date'] ?? null
                 ]);
             }
 
-            if (isset($actions['delete']['index'])) {
+            // 3. Borrado (DELETE) - IMPORTANTE: Castear a int
+            if (!empty($actions['delete']['index'])) {
                 $this->executeDeletion($user, (int)$actions['delete']['index']);
             }
 
-            if ($response['intent'] === 'LIST') {
+            // 4. Listado (LIST)
+            if ($response['intent'] === 'LIST' && isset($actions['list'])) {
                 $this->executeListing($user, $actions['list']);
                 return response('OK', 200);
             }
 
+            // 5. Limpieza total
             if ($response['intent'] === 'CLEAR_ALL') {
                 Memory::where('phone_number', $user->phone_number)->delete();
             }
 
-            $this->sendMessage($user->phone_number, $response['reply']);
+            // Respuesta final
+            $finalReply = $response['reply'] ?? "¡Listo! He procesado tu solicitud. 🤡";
+            $this->sendMessage($user->phone_number, $finalReply);
         } catch (\Exception $e) {
-            Log::error("Marlin AI Error: " . $e->getMessage());
+            Log::error("Marlin AI Error Crítico: " . $e->getMessage());
             $this->sendMessage($user->phone_number, "Lo siento, me dio un calambre en la aleta. 🤡");
         }
 
